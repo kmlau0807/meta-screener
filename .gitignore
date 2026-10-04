@@ -4,3 +4,7 @@ reports/
 __pycache__/
 *.pyc
 .DS_Store
+
+# local secrets — NEVER commit (holds Telegram token / chat id / SMTP creds)
+.env
+

@@ -74,10 +74,69 @@ def fetch_symbols(symbols, period=FETCH_PERIOD, refresh=False, verbose=True):
     return out
 
 
-def avg_turnover_hkd(df: pd.DataFrame, months=6) -> float:
-    """Average daily turnover (Close * Volume) over recent months."""
+def avg_turnover(df: pd.DataFrame, months=6) -> float:
+    """Average daily turnover (Close * Volume) over recent months.
+
+    Currency follows the symbol's quote (.HK -> HKD, US -> USD, ...); the
+    screener labels it via config.CURRENCY.
+    """
     cutoff = df.index.max() - pd.DateOffset(months=months)
     d = df[df.index >= cutoff]
     if d.empty:
         return 0.0
     return float((d["Close"] * d["Volume"]).mean())
+
+
+def fetch_nasdaq_universe(cache_hours=24):
+    """Full NASDAQ-listed universe from nasdaqtrader.com's daily symbol list.
+
+    Returns {symbol: name}. ETFs / warrants / units (Symbol containing
+    ^ . $ = ) and long odd tickers are skipped. Cached as JSON so the slow
+    network fetch only happens once per `cache_hours`.
+    """
+    import json
+    import io
+    import csv
+    import urllib.request
+
+    p = os.path.join(CACHE_DIR, "nasdaq_universe.json")
+    if os.path.exists(p) and (time.time() - os.path.getmtime(p)) < cache_hours * 3600:
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    url = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read().decode("utf-8", errors="replace")
+        reader = csv.DictReader(io.StringIO(raw), delimiter="|")
+        out = {}
+        for row in reader:
+            sym = (row.get("Symbol") or "").strip()
+            name = (row.get("Security Name") or "").strip()
+            if sym.startswith("File Creation"):   # trailer line
+                break
+            if not sym:
+                continue
+            if (row.get("Test Issue") or "").strip().upper() == "Y":
+                continue
+            if (row.get("ETF") or "").strip().upper() == "Y":
+                continue
+            lname = name.lower()
+            if any(w in lname for w in ("warrant", " units", "unit rights",
+                                        " rights", "preferred stock")):
+                continue   # skip warrants / units / rights / preferreds
+            if any(c in sym for c in "^.$="):   # skip warrants / units / prefs
+                continue
+            if len(sym) > 5:                       # skip odd long tickers
+                continue
+            out[sym] = name or sym
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(out, f)
+        print(f"[nasdaq] fetched {len(out)} symbols")
+        return out
+    except Exception as e:
+        print(f"[WARN] nasdaq universe fetch failed: {e}")
+        return {}

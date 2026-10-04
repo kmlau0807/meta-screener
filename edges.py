@@ -281,5 +281,164 @@ def edge_breakout_retest(df: pd.DataFrame, zones):
     return {"breakout": {"active": False}, "retest": {"active": False}}
 
 
+# ---------------------------------------------------------------- Edge 8
+
+def edge_relative_strength(df: pd.DataFrame, bench_df: pd.DataFrame):
+    """Relative strength vs benchmark (J Law: 大盤跌佢升 = 照妖鏡).
+
+    A stock is a leader when it OUTPERFORMS the market over multiple windows.
+    The strongest signal is the benchmark DOWN while the stock is UP — that
+    divergence exposes hidden strength. Compare over RS_WINDOWS lookbacks and
+    count how many windows the stock beats the benchmark.
+    """
+    if bench_df is None or len(bench_df) < C.RS_WINDOWS[-1]:
+        return {"active": False, "reason": "no benchmark", "score": 0}
+
+    # align both series on their common trading dates
+    common = df.index.intersection(bench_df.index)
+    if len(common) < C.RS_WINDOWS[-1] + 5:
+        return {"active": False, "reason": "insufficient date overlap", "score": 0}
+
+    s = df["Close"].reindex(common).astype(float)
+    b = bench_df["Close"].reindex(common).astype(float)
+
+    out = {}
+    beats = 0
+    down_up = False
+    last_rs = None
+    for w in C.RS_WINDOWS:
+        if len(common) <= w:
+            continue
+        s_ret = float(s.iloc[-1] / s.iloc[-(w + 1)] - 1)
+        b_ret = float(b.iloc[-1] / b.iloc[-(w + 1)] - 1)
+        rs = s_ret - b_ret
+        out[f"rs_{w}"] = round(rs, 3)
+        out[f"stock_{w}"] = round(s_ret, 3)
+        out[f"bench_{w}"] = round(b_ret, 3)
+        if rs > 0:
+            beats += 1
+        if w == C.RS_WINDOWS[-1]:
+            last_rs = rs
+        # 照妖鏡: market down but this stock up
+        if b_ret < 0 and s_ret > 0:
+            down_up = True
+
+    out["beats"] = beats
+    out["down_market_up_stock"] = bool(down_up)
+    # 照妖鏡: a single clear divergence (market down, stock up) is itself a
+    # strong edge per J Law, so it both activates RS and lifts the score.
+    if down_up:
+        beats = max(beats, 2)
+    out["score"] = beats          # 0-3 windows outperformed
+    out["active"] = bool(
+        beats >= C.RS_MIN_OUTPERFORM and (last_rs is None or last_rs > 0)
+    ) or bool(down_up)
+    return out
+
+
 def c_last(df):
     return float(df["Close"].iloc[-1])
+
+
+def rsi(series: pd.Series, n: int = 14) -> pd.Series:
+    """Wilder's RSI."""
+    delta = series.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean()
+    rs = gain / loss.replace(0, np.nan)
+    out = 100 - 100 / (1 + rs)
+    return out.fillna(100.0)
+
+
+def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    """Return (macd_line, signal_line, histogram) as Series."""
+    ef, es = series.ewm(span=fast, adjust=False).mean(), series.ewm(span=slow, adjust=False).mean()
+    macd_line = ef - es
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+
+# ---------------------------------------------------------------- Edge 9
+
+def edge_divergence(df: pd.DataFrame, lookback: int = C.DIVERGENCE_LOOKBACK,
+                    min_bars: int = C.DIVERGENCE_MIN_BARS):
+    """RSI / MACD divergence — momentum deceleration hidden in price.
+
+    Bullish (底背離, a BUY edge for this long-biased framework):
+        price makes a lower low, but the indicator makes a HIGHER low ->
+        downside momentum is fading -> a reversal up is more likely.
+    Bearish (頂背離, a WARNING only, never scored):
+        price makes a higher high, but the indicator makes a LOWER high ->
+        upside momentum is fading -> caution / take-profit zone.
+
+    We compare the two most recent swing pivots (find_pivots, k=3). A
+    minimum bar gap between the two pivots is required so we don't flag
+    micro-noise as a divergence.
+    """
+    out = {
+        "active": False, "score": 0,
+        "bull_rsi": False, "bull_macd": False,
+        "bear_rsi": False, "bear_macd": False,
+        "bull_rsi_date": None, "bull_macd_date": None,
+        "bear_rsi_date": None, "bear_macd_date": None,
+        "detail": "",
+    }
+    if len(df) < 60:
+        return out
+
+    close = df["Close"]
+    r = rsi(close, 14)
+    m, s, h = macd(close)
+
+    ph, pl = find_pivots(df.tail(lookback), 3)
+
+    def _vals(pivots):
+        outv = []
+        for dt, price in pivots:
+            if dt in r.index:
+                outv.append((dt, price, float(r.loc[dt]), float(m.loc[dt])))
+        return outv
+
+    plv, phv = _vals(pl), _vals(ph)
+
+    # --- bullish: two recent swing lows ---
+    if len(plv) >= 2:
+        d1, p1, r1, mc1 = plv[-2]
+        d2, p2, r2, mc2 = plv[-1]
+        gap_ok = (d2 - d1).days >= min_bars
+        if gap_ok and p2 < p1:           # price lower low
+            if r2 > r1:
+                out["bull_rsi"] = True
+                out["bull_rsi_date"] = d2
+            if mc2 > mc1:
+                out["bull_macd"] = True
+                out["bull_macd_date"] = d2
+
+    # --- bearish: two recent swing highs ---
+    if len(phv) >= 2:
+        d1, p1, r1, mc1 = phv[-2]
+        d2, p2, r2, mc2 = phv[-1]
+        gap_ok = (d2 - d1).days >= min_bars
+        if gap_ok and p2 > p1:           # price higher high
+            if r2 < r1:
+                out["bear_rsi"] = True
+                out["bear_rsi_date"] = d2
+            if mc2 < mc1:
+                out["bear_macd"] = True
+                out["bear_macd_date"] = d2
+
+    out["active"] = out["bull_rsi"] or out["bull_macd"]
+    out["score"] = 1 if out["active"] else 0
+
+    bits = []
+    if out["bull_rsi"]:
+        bits.append("RSI 底背離（價格新低、RSI 唔新低＝下跌動力減弱）")
+    if out["bull_macd"]:
+        bits.append("MACD 底背離（價格新低、MACD 唔新低）")
+    if out["bear_rsi"]:
+        bits.append("RSI 頂背離警告（價格新高、RSI 唔新高＝上升動力減弱）")
+    if out["bear_macd"]:
+        bits.append("MACD 頂背離警告（價格新高、MACD 唔新高）")
+    out["detail"] = "；".join(bits) if bits else "無明顯背離"
+    return out

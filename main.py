@@ -31,6 +31,9 @@ def parse_args():
                    help="Min avg daily turnover (HKD/USD)")
     p.add_argument("--no-dashboard", action="store_true",
                    help="Skip HTML dashboard generation")
+    p.add_argument("--market", type=str, default=C.DEFAULT_MARKET,
+                   choices=list(C.MARKETS.keys()),
+                   help="Market universe: hk or us (default: hk)")
     return p.parse_args()
 
 
@@ -38,21 +41,33 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     args = parse_args()
 
+    # resolve market: universe / benchmark / liquidity filter / currency
+    mkt = C.MARKETS[args.market]
+    C.RS_BENCHMARK = mkt["benchmark"]
+    C.MIN_AVG_TURNOVER = mkt["min_turnover"]
+    C.CURRENCY = mkt["currency"]
+
     if args.symbols:
         symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
         names = {s: s for s in symbols}
     else:
-        symbols = list(C.HK_UNIVERSE.keys())
-        names = dict(C.HK_UNIVERSE)
+        symbols = list(mkt["universe"].keys())
+        names = dict(mkt["universe"])
 
     C.MIN_AVG_TURNOVER = args.min_turnover
     C.DASHBOARD_TOP_N = args.top
 
-    print(f"META Screener - {len(symbols)} symbols")
-    frames = fetch_symbols(symbols, refresh=args.refresh)
+    print(f"META Screener [{args.market.upper()}] - {len(symbols)} symbols")
+    fetch_list = list(symbols)
+    if C.RS_BENCHMARK:
+        fetch_list.append(C.RS_BENCHMARK)
+    frames = fetch_symbols(fetch_list, refresh=args.refresh)
+    bench_df = frames.pop(C.RS_BENCHMARK, None) if C.RS_BENCHMARK else None
+    if C.RS_BENCHMARK and bench_df is None:
+        print(f"[WARN] benchmark {C.RS_BENCHMARK} unavailable -> RS edge disabled")
     print(f"Loaded price data for {len(frames)}/{len(symbols)} symbols\n")
 
-    results, rejected = screen(frames, names)
+    results, rejected = screen(frames, names, bench_df=bench_df)
 
     print(f"{'=' * 100}")
     print(f"{'SYM':<9} {'NAME':<16} {'CLOSE':>8} {'SETUP':<14} {'SCORE':>5} "
@@ -80,6 +95,13 @@ def main():
                      if sup.get("active") and stop else "")
             print(f"  {r['symbol']} {r['name']}: {r['setup']} "
                   f"score {r['score']}{extra}")
+
+    rs_leaders = [r for r in results if r.get("rs_leader")]
+    if rs_leaders:
+        print(f"\n*** {len(rs_leaders)} RS LEADER(S) (strong RS, watch) ***")
+        for r in rs_leaders:
+            print(f"  {r['symbol']} {r['name']}: {r['setup']} "
+                  f"score {r['score']} | {', '.join(r['active_edges'])}")
 
     if args.no_dashboard or not results:
         return
