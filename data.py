@@ -140,3 +140,92 @@ def fetch_nasdaq_universe(cache_hours=24):
     except Exception as e:
         print(f"[WARN] nasdaq universe fetch failed: {e}")
         return {}
+
+
+_SLICK_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.slickcharts.com/",
+}
+_SLICK_SOURCES = (
+    ("S&P 500", "https://www.slickcharts.com/sp500"),
+    ("Nasdaq-100", "https://www.slickcharts.com/nasdaq100"),
+)
+
+
+def _parse_slickcharts(html: str) -> list[tuple[str, str]]:
+    """[(symbol, company), ...] from a Slickcharts constituents table.
+
+    Picks the first <table> whose header row contains a 'Symbol' column and
+    reads that column (plus 'Company' when present). Ticker dots are normalised
+    to dashes so e.g. BRK.B becomes Yahoo's BRK-B.
+    """
+    import re
+
+    def _strip(s: str) -> str:
+        s = re.sub(r"<[^>]+>", "", s)
+        return (s.replace("&amp;", "&").replace("&nbsp;", " ")
+                 .replace("&#39;", "'").strip())
+
+    for tbl in re.findall(r"<table.*?</table>", html, flags=re.S):
+        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", tbl, flags=re.S)
+        if len(rows) < 2:
+            continue
+        hdr = [_strip(c) for c in
+               re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", rows[0], flags=re.S)]
+        sym_idx = next((i for i, h in enumerate(hdr) if h.lower() == "symbol"), None)
+        if sym_idx is None:
+            continue
+        name_idx = next((i for i, h in enumerate(hdr) if h.lower() == "company"), None)
+        out = []
+        for row in rows[1:]:
+            cells = [_strip(c) for c in
+                     re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, flags=re.S)]
+            if len(cells) <= sym_idx:
+                continue
+            sym = cells[sym_idx].strip().upper().replace(".", "-")
+            if not sym:
+                continue
+            name = (cells[name_idx].strip()
+                    if (name_idx is not None and len(cells) > name_idx) else "")
+            out.append((sym, name))
+        if out:
+            return out
+    raise RuntimeError("no Symbol table found")
+
+
+def fetch_us_universe(cache_hours=24):
+    """Dynamic US large-cap universe: S&P 500 union Nasdaq-100 (Slickcharts).
+
+    Returns {symbol: name}, cached as JSON for `cache_hours`. Returns {} on
+    failure so the caller can fall back to the static US_UNIVERSE in config.
+    NOTE: uses requests, not bare urllib — Slickcharts 403s a minimal UA.
+    """
+    import json
+    import requests
+
+    p = os.path.join(CACHE_DIR, "us_universe.json")
+    if os.path.exists(p) and (time.time() - os.path.getmtime(p)) < cache_hours * 3600:
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    out = {}
+    for label, url in _SLICK_SOURCES:
+        try:
+            r = requests.get(url, headers=_SLICK_HEADERS, timeout=25)
+            r.raise_for_status()
+            rows = _parse_slickcharts(r.text)
+            for sym, name in rows:
+                out.setdefault(sym, name)
+            print(f"[us] fetched {label}: {len(rows)} constituents")
+        except Exception as e:  # noqa: BLE001
+            print(f"[WARN] {label} universe fetch failed: {e}")
+    if out:
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(out, f)
+        print(f"[us] fetched {len(out)} symbols")
+    return out

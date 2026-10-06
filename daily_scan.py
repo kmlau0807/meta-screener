@@ -30,8 +30,12 @@ from screener import screen
 from dashboard import build_dashboard, build_markdown_summary
 
 
-def run_market(market, refresh, top):
-    """Screen one market; save dashboard; return (results, outpath)."""
+def run_market(market, refresh, top, tg_top=0):
+    """Screen one market; save dashboard; return (results, outpath).
+
+    `tg_top` caps how many charts are pushed to Telegram for this market
+    (highest score first). 0 = no cap.
+    """
     if market not in C.MARKETS:
         raise SystemExit(f"unknown market '{market}' (use {list(C.MARKETS)})")
     mkt = C.MARKETS[market]
@@ -41,12 +45,32 @@ def run_market(market, refresh, top):
     C.CURRENCY = mkt["currency"]
     C.DASHBOARD_TOP_N = top
 
-    if mkt.get("universe_source") == "nasdaq":
+    src = mkt.get("universe_source")
+    if src == "nasdaq":
         from data import fetch_nasdaq_universe
         univ = fetch_nasdaq_universe()
         symbols = list(univ.keys())
         names = univ
         print(f"  nasdaq universe: {len(symbols)} symbols")
+    elif src == "us":
+        from data import fetch_us_universe
+        univ = fetch_us_universe()
+        if univ:
+            # Union with the curated list rather than replacing it: the S&P 500 /
+            # Nasdaq-100 pulls miss names you care about (NET, SNOW, ZS, MDB,
+            # ROKU, TSM are in US_UNIVERSE but not either index).
+            merged = dict(mkt["universe"])
+            merged.update(univ)
+            symbols = list(merged.keys())
+            names = merged
+            print(f"  us universe (dynamic): {len(univ)} fetched + "
+                  f"{len(mkt['universe'])} static -> {len(symbols)} symbols")
+        else:
+            # A failed source fetch must never break the scheduled run.
+            symbols = list(mkt["universe"].keys())
+            names = dict(mkt["universe"])
+            print(f"  us universe: dynamic fetch failed -> static "
+                  f"{len(symbols)} symbols")
     else:
         symbols = list(mkt["universe"].keys())
         names = dict(mkt["universe"])
@@ -95,7 +119,12 @@ def run_market(market, refresh, top):
     charts_dir = os.path.join(C.REPORT_DIR, f"charts_{market}_{stamp}")
     os.makedirs(charts_dir, exist_ok=True)
     chart_paths = []
-    for r in (meta + leaders):
+    picks = meta + leaders
+    if tg_top:
+        picks = sorted(picks, key=lambda r: r["score"], reverse=True)[:tg_top]
+        print(f"  telegram cap: {len(meta) + len(leaders)} signals "
+              f"-> top {len(picks)}")
+    for r in picks:
         d = prepare_chart_data(frames[r["symbol"]])
         p = build_chart_png(r, d, os.path.join(charts_dir, f"{r['symbol']}.png"))
         if p:
@@ -344,6 +373,9 @@ def main():
                    help="Charts per dashboard")
     p.add_argument("--no-email", action="store_true", help="Skip email send")
     p.add_argument("--no-telegram", action="store_true", help="Skip Telegram push")
+    p.add_argument("--telegram-top", type=int, default=C.TELEGRAM_TOP_N,
+                   help="Max charts pushed PER MARKET, highest score first "
+                        f"(default {C.TELEGRAM_TOP_N}, 0 = no cap)")
     p.add_argument("--telegram-summary", action="store_true",
                    help="Also send the full markdown summary text before the charts "
                         "(default is charts-only: each caption already carries its "
@@ -353,7 +385,8 @@ def main():
     markets = [m.strip() for m in args.market.split(",") if m.strip()]
     paths, markets_results = [], []
     for m in markets:
-        res, out, md_out, chart_paths = run_market(m, args.refresh, args.top)
+        res, out, md_out, chart_paths = run_market(m, args.refresh, args.top,
+                                                   tg_top=args.telegram_top)
         paths.append(out)
         paths.append(md_out)
         markets_results.append((m, res, md_out, chart_paths))

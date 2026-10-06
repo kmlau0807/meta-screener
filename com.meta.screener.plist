@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.meta.screener</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/kmac/WorkBuddy AI/2026-10-02-12-48-59/meta-screener/venv/bin/python</string>
+        <string>/Users/kmac/WorkBuddy AI/2026-10-02-12-48-59/meta-screener/daily_scan.py</string>
+        <string>--market</string>
+        <string>hk,us,nasdaq</string>
+        <string>--no-email</string>
+    </array>
+
+    <!-- Run daily at 08:00 Hong Kong time -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/kmac/WorkBuddy AI/2026-10-02-12-48-59/meta-screener</string>
+
+    <!-- HOME is required: kaleido renders charts via headless Chrome, which needs
+         a writable home for its font cache and profile. launchd does not always
+         provide one. PATH is widened so any subprocess can find Homebrew tools. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/kmac</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/kmac/WorkBuddy AI/2026-10-02-12-48-59/meta-screener/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kmac/WorkBuddy AI/2026-10-02-12-48-59/meta-screener/launchd.err.log</string>
+
+    <!-- Do NOT run immediately on load; only at the scheduled time -->
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

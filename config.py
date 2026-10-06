@@ -238,7 +238,8 @@ MARKETS = {
         "currency": "HKD",
     },
     "us": {
-        "universe": US_UNIVERSE,
+        "universe": US_UNIVERSE,      # static fallback if the dynamic fetch fails
+        "universe_source": "us",      # dynamic: S&P 500 + Nasdaq-100 (Slickcharts)
         "benchmark": "^IXIC",       # Nasdaq Composite (J Law growth leaders)
         "min_turnover": 200_000_000,
         "currency": "USD",
@@ -274,6 +275,12 @@ META_SETUP_MIN_SCORE = 5.0
 # ---------------------------------------------------------------- Report
 DASHBOARD_TOP_N = 14             # charts to embed in dashboard
 CHART_BARS = 130                 # candles per chart
+
+# Max charts pushed to Telegram PER MARKET, highest score first. 0 = no cap.
+# Keeps the daily push readable now that the US universe is dynamic (~500 names
+# can throw off 60+ signals on its own). Charts are still rendered for the local
+# dashboard regardless of this cap.
+TELEGRAM_TOP_N = 10
 
 # ---------------------------------------------------------------- Email (optional)
 # Fill to enable daily report delivery via daily_scan.py. For Gmail use an
