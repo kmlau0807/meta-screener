@@ -184,7 +184,7 @@ US_UNIVERSE = {
 }
 
 # ---------------------------------------------------------------- Filters
-MIN_AVG_TURNOVER = 50_000_000   # default (HK) avg daily turnover (close*volume), 6m
+MIN_AVG_TURNOVER = 30_000_000   # default (HK) avg daily turnover (close*volume), 6m
 MIN_BARS = 120                  # minimum trading days of data required
 
 # ---------------------------------------------------------------- Edge tuning
@@ -234,7 +234,7 @@ MARKETS = {
     "hk": {
         "universe": HK_UNIVERSE,
         "benchmark": "^HSI",        # Hang Seng Index
-        "min_turnover": 50_000_000,
+        "min_turnover": 30_000_000,
         "currency": "HKD",
     },
     "us": {
