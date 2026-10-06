@@ -209,13 +209,70 @@ def _discover_chat_id(token):
     return None
 
 
-def send_telegram(md_path, chart_paths):
-    """Push a markdown summary + one chart photo per signal stock to Telegram.
+TELEGRAM_CAPTION_LIMIT = 1000  # Telegram sendPhoto caption hard cap is 1024 chars
 
-    Uses only stdlib urllib (no requests). The .md is split into <=3900-char
-    chunks (Telegram hard limit 4096). Plain text (no parse_mode) so # headings /
-    - bullets render literally. Each chart PNG is sent via sendPhoto. If
-    TG_CHAT_ID is empty it is auto-discovered from the latest message to the bot.
+
+def _parse_symbol_blocks(md_path, symbols=None):
+    """Split the markdown summary into one explanation block per symbol.
+
+    Returns {symbol: block_text}, where block_text is the heading line followed
+    by every bullet until the next '##' heading. A heading is only treated as a
+    symbol block when its first token is one of `symbols` — section headings
+    like '## META SETUP' or '## RS LEADER（觀察名單）' are skipped.
+    """
+    try:
+        text = open(md_path, encoding="utf-8").read()
+    except OSError:
+        return {}
+    known = set(symbols) if symbols else None
+    blocks, cur, buf = {}, None, []
+    for ln in text.split("\n"):
+        if ln.startswith("## "):
+            if cur and buf:
+                blocks[cur] = "\n".join(buf).strip()
+            head = ln[3:].strip()
+            first = head.split()[0] if head.split() else ""
+            cur = first if (known is None or first in known) else None
+            buf = [head] if cur else []
+        elif cur is not None:
+            buf.append(ln)
+    if cur and buf:
+        blocks[cur] = "\n".join(buf).strip()
+    return blocks
+
+
+def _summary_header(md_path, symbols=None):
+    """Title + signal-count lines from the summary, WITHOUT per-stock detail.
+
+    Keeps everything before the first symbol block, so you still get market,
+    date, benchmark and META/RS counts as context for the charts that follow —
+    but not the full per-stock explanation, which now lives in each caption.
+    """
+    try:
+        text = open(md_path, encoding="utf-8").read()
+    except OSError:
+        return ""
+    known = set(symbols) if symbols else None
+    out = []
+    for ln in text.split("\n"):
+        if ln.startswith("## "):
+            head = ln[3:].strip()
+            first = head.split()[0] if head.split() else ""
+            if known is None or first in known:
+                break
+        out.append(ln)
+    return "\n".join(out).strip()
+
+
+def send_telegram(md_path, chart_paths, send_summary=False):
+    """Push one chart photo per signal stock to Telegram, each self-explaining.
+
+    Uses only stdlib urllib (no requests). Each chart PNG is sent via sendPhoto
+    with that stock's own explanation as its caption, so the default push is
+    charts-only. Pass send_summary=True to ALSO send the full markdown summary
+    first, split into <=3900-char chunks (Telegram hard limit 4096). Plain text
+    (no parse_mode) so # headings / - bullets render literally. If TG_CHAT_ID is
+    empty it is auto-discovered from the latest message to the bot.
     """
     token, chat = C.TG_BOT_TOKEN, C.TG_CHAT_ID
     if not token:
@@ -230,31 +287,45 @@ def send_telegram(md_path, chart_paths):
             print("[telegram] TG_CHAT_ID not set and no message found -> skipped. "
                   "Send a message to the bot first, then re-run.")
             return
-    # ---- markdown text in chunks ----
-    text = open(md_path, encoding="utf-8").read()
-    chunks, cur = [], ""
-    for line in text.split("\n"):
-        if len(cur) + len(line) + 1 > 3900:
+    # ---- text: full summary only on request ----
+    # Default is charts-only. Every chart already carries its own explanation as
+    # its caption, so re-sending the whole summary first is pure duplication.
+    if send_summary:
+        text = open(md_path, encoding="utf-8").read()
+        chunks, cur = [], ""
+        for line in text.split("\n"):
+            if len(cur) + len(line) + 1 > 3900:
+                chunks.append(cur)
+                cur = line
+            else:
+                cur = (cur + "\n" + line) if cur else line
+        if cur:
             chunks.append(cur)
-            cur = line
-        else:
-            cur = (cur + "\n" + line) if cur else line
-    if cur:
-        chunks.append(cur)
-    ok = 0
-    for i, ch in enumerate(chunks, 1):
-        status, _ = _tg_post(token, "sendMessage",
-                             data={"chat_id": chat, "text": ch})
-        if status == 200:
-            ok += 1
-        else:
-            print(f"[telegram] chunk {i} HTTP {status}")
-    print(f"[telegram] sent {ok}/{len(chunks)} text chunks from "
-          f"{os.path.basename(md_path)}")
-    # ---- chart photos ----
+        ok = 0
+        for i, ch in enumerate(chunks, 1):
+            status, _ = _tg_post(token, "sendMessage",
+                                 data={"chat_id": chat, "text": ch})
+            if status == 200:
+                ok += 1
+            else:
+                print(f"[telegram] chunk {i} HTTP {status}")
+        print(f"[telegram] sent {ok}/{len(chunks)} text chunks from "
+              f"{os.path.basename(md_path)}")
+    else:
+        head = _summary_header(md_path, [s for s, _ in chart_paths])
+        if head:
+            status, _ = _tg_post(token, "sendMessage",
+                                 data={"chat_id": chat, "text": head})
+            print(f"[telegram] header "
+                  f"{'sent' if status == 200 else 'FAILED HTTP ' + str(status)}")
+    # ---- chart photos, each captioned with its OWN explanation ----
+    blocks = _parse_symbol_blocks(md_path, [s for s, _ in chart_paths])
     for sym, p in chart_paths:
+        caption = blocks.get(sym, "").strip() or sym
+        if len(caption) > TELEGRAM_CAPTION_LIMIT:
+            caption = caption[:TELEGRAM_CAPTION_LIMIT - 1].rstrip() + "…"
         status, _ = _tg_post(token, "sendPhoto",
-                             data={"chat_id": chat, "caption": sym},
+                             data={"chat_id": chat, "caption": caption},
                              files={"photo": p})
         if status == 200:
             print(f"[telegram] sent chart {sym}")
@@ -273,6 +344,10 @@ def main():
                    help="Charts per dashboard")
     p.add_argument("--no-email", action="store_true", help="Skip email send")
     p.add_argument("--no-telegram", action="store_true", help="Skip Telegram push")
+    p.add_argument("--telegram-summary", action="store_true",
+                   help="Also send the full markdown summary text before the charts "
+                        "(default is charts-only: each caption already carries its "
+                        "own explanation)")
     args = p.parse_args()
 
     markets = [m.strip() for m in args.market.split(",") if m.strip()]
@@ -287,7 +362,8 @@ def main():
         send_email(paths, markets_results)
     if not args.no_telegram:
         for m, res, md_out, chart_paths in markets_results:
-            send_telegram(md_out, chart_paths)
+            send_telegram(md_out, chart_paths,
+                          send_summary=args.telegram_summary)
 
 
 if __name__ == "__main__":

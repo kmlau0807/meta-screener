@@ -173,7 +173,9 @@ def build_chart_png(res, df, outpath):
     """Render one chart to PNG (for Telegram sendPhoto)."""
     try:
         fig = _build_fig(res, df)
-        fig.write_image(outpath, format="png", engine="kaleido",
+        # NOTE: kaleido >=1.0 rejects the legacy `engine=` kwarg (plotly >=6 removed
+        # it); passing it raises TypeError and every chart silently fails to render.
+        fig.write_image(outpath, format="png",
                         width=1000, height=620, scale=2)
         return outpath
     except Exception as e:
